@@ -23,8 +23,11 @@ import (
 	"net"
 	"os"
 	"path"
-	"strings"
 	"time"
+
+	"github.com/golang/glog"
+	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -38,16 +41,20 @@ type NvidiaDevicePlugin struct {
 	ResourceManager
 	resourceName   string
 	allocateEnvvar string
-	socket string
+	socket         string
 
-	server *grpc.Server
+	server        *grpc.Server
 	cachedDevices []*Device
-	health chan *Device
-	stop   chan interface{}
+	health        chan *Device
+	stop          chan interface{}
+
+	devMap         map[string]uint
+	kubeInteractor *KubeInteractor
 }
 
 // NewNvidiaDevicePlugin returns an initialized NvidiaDevicePlugin
 func NewNvidiaDevicePlugin(resourceName string, resourceManager ResourceManager, allocateEnvvar string, socket string) *NvidiaDevicePlugin {
+
 	return &NvidiaDevicePlugin{
 		ResourceManager: resourceManager,
 		resourceName:    resourceName,
@@ -60,6 +67,9 @@ func NewNvidiaDevicePlugin(resourceName string, resourceManager ResourceManager,
 		server:        nil,
 		health:        nil,
 		stop:          nil,
+
+		devMap:         nil,
+		kubeInteractor: nil,
 	}
 }
 
@@ -68,6 +78,16 @@ func (m *NvidiaDevicePlugin) initialize() {
 	m.server = grpc.NewServer([]grpc.ServerOption{}...)
 	m.health = make(chan *Device)
 	m.stop = make(chan interface{})
+
+	if ki, err := NewKubeInteractor(); err != nil {
+		glog.Fatalf("cannot create kube interactor. %v", err)
+	} else {
+		m.kubeInteractor = ki
+	}
+
+	_, devMap := GetDevices()
+	m.devMap = devMap
+
 }
 
 func (m *NvidiaDevicePlugin) cleanup() {
@@ -76,6 +96,21 @@ func (m *NvidiaDevicePlugin) cleanup() {
 	m.server = nil
 	m.health = nil
 	m.stop = nil
+
+	m.devMap = nil
+	m.kubeInteractor = nil
+
+}
+
+func (m *NvidiaDevicePlugin) GetDeviceNameByIndex(index uint) (name string, found bool) {
+	iMap := map[uint]string{}
+
+	for k, v := range m.devMap {
+		iMap[v] = k
+	}
+
+	name, found = iMap[index]
+	return name, found
 }
 
 // Start starts the gRPC server, registers the device plugin with the Kubelet,
@@ -212,27 +247,106 @@ func (m *NvidiaDevicePlugin) ListAndWatch(e *pluginapi.Empty, s pluginapi.Device
 
 // Allocate which return list of devices.
 func (m *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *pluginapi.AllocateRequest) (*pluginapi.AllocateResponse, error) {
-	responses := pluginapi.AllocateResponse{}
+
+	var reqCount uint
+
 	for _, req := range reqs.ContainerRequests {
-		for _, id := range req.DevicesIDs {
-			if !m.deviceExists(id) {
-				return nil, fmt.Errorf("invalid allocation request for '%s': unknown device: %s", m.resourceName, id)
+		reqCount += uint(len(req.DevicesIDs))
+	}
+
+	if len(reqs.ContainerRequests) == 0 {
+		return nil, fmt.Errorf("No container request")
+	}
+
+	responses := pluginapi.AllocateResponse{}
+
+	firstContainerReq := reqs.ContainerRequests[0]
+	firstContainerReqDeviceCount := uint(len(firstContainerReq.DevicesIDs))
+
+	availablePods := []*v1.Pod{}
+	pendingPods, err := m.kubeInteractor.GetSpecificStatusPodsOnNode("Pending")
+	if err != nil {
+		return nil, err
+	}
+	for _, pod := range pendingPods {
+		current := pod
+		if IsGPURequiredPod(&current) && !IsGPUAssignedPod(&current) && !IsShouldDeletePod(&current) {
+			availablePods = append(availablePods, &current)
+		}
+	}
+
+	orderedPods := OrderPodsByPredicateTime(availablePods)
+
+	found := false
+	var candidatePod *v1.Pod
+
+	for _, pod := range orderedPods {
+		if found {
+			break
+		}
+		for i, c := range pod.Spec.Containers {
+			if !IsGPURequiredContainer(&c) {
+				continue
+			}
+
+			if GetGPUResourceOfContainer(&pod.Spec.Containers[i], VCoreAnnotationConst) == firstContainerReqDeviceCount {
+				glog.Infof("Got candidate Pod %s(%s), the device count is: %d", pod.UID, c.Name, firstContainerReqDeviceCount)
+				candidatePod = pod
+				found = true
+				break
+			}
+		}
+	}
+
+	if found {
+		id := GetGPUIDFromPodAnnotation(candidatePod)
+		if id < 0 {
+			glog.Warningf("Failed to get the dev ", candidatePod)
+		}
+
+		if id >= 0 {
+			_, ok := m.GetDeviceNameByIndex(uint(id))
+			if !ok {
+				glog.Warningf("Failed to find the dev for pod %v because it's not able to find dev with index %d",
+					candidatePod,
+					id)
+				id = -1
 			}
 		}
 
-		response := pluginapi.ContainerAllocateResponse{
-			Envs: map[string]string{
-				m.allocateEnvvar: strings.Join(req.DevicesIDs, ","),
-			},
-		}
-		if *passDeviceSpecs {
-			response.Devices = m.apiDeviceSpecs(req.DevicesIDs)
+		if id < 0 {
+			return genResponse(reqs, reqCount), nil
 		}
 
-		responses.ContainerResponses = append(responses.ContainerResponses, &response)
+		for _, req := range reqs.ContainerRequests {
+			reqGPU := uint(len(req.DevicesIDs))
+			response := pluginapi.ContainerAllocateResponse{
+				//TODO: (tizhou86) Add envs into response
+				Envs: map[string]string{
+					ContainerResourceEnv: fmt.Sprintf("%d", reqGPU),
+				},
+			}
+			responses.ContainerResponses = append(responses.ContainerResponses, &response)
+		}
+
+		newPod := UpdatePodAnnotations(candidatePod)
+
+		pod, err := m.kubeInteractor.clientset.CoreV1().Pods(candidatePod.Namespace).Get(context.TODO(), candidatePod.Name, metav1.GetOptions{})
+		if err != nil {
+			return genResponse(reqs, reqCount), nil
+		}
+		newPod = UpdatePodAnnotations(pod)
+		_, err = m.kubeInteractor.clientset.CoreV1().Pods(newPod.Namespace).Update(context.TODO(), newPod, metav1.UpdateOptions{})
+		if err != nil {
+			return genResponse(reqs, reqCount), nil
+		}
+
+	} else {
+		return genResponse(reqs, reqCount), nil
 	}
 
 	return &responses, nil
+
 }
 
 func (m *NvidiaDevicePlugin) PreStartContainer(context.Context, *pluginapi.PreStartContainerRequest) (*pluginapi.PreStartContainerResponse, error) {
@@ -307,4 +421,18 @@ func (m *NvidiaDevicePlugin) apiDeviceSpecs(filter []string) []*pluginapi.Device
 	}
 
 	return specs
+}
+
+func genResponse(reqs *pluginapi.AllocateRequest, podReqGPU uint) *pluginapi.AllocateResponse {
+	responses := pluginapi.AllocateResponse{}
+	for _, req := range reqs.ContainerRequests {
+		response := pluginapi.ContainerAllocateResponse{
+			//TODO: (tizhou86) Add envs into response
+			Envs: map[string]string{
+				ContainerResourceEnv: fmt.Sprintf("%d", uint(len(req.DevicesIDs))),
+			},
+		}
+		responses.ContainerResponses = append(responses.ContainerResponses, &response)
+	}
+	return &responses
 }

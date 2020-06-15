@@ -21,6 +21,7 @@ replace (
 	k8s.io/kube-scheduler => k8s.io/kube-scheduler v0.18.2
 	k8s.io/kubectl => k8s.io/kubectl v0.18.2
 	k8s.io/kubelet => k8s.io/kubelet v0.18.2
+	k8s.io/kubernetes => k8s.io/kubernetes v1.18.2
 	k8s.io/legacy-cloud-providers => k8s.io/legacy-cloud-providers v0.18.2
 	k8s.io/metrics => k8s.io/metrics v0.18.2
 	k8s.io/sample-apiserver => k8s.io/sample-apiserver v0.18.2
@@ -29,7 +30,13 @@ replace (
 require (
 	github.com/NVIDIA/gpu-monitoring-tools v0.0.0-20200421213100-de959f43b55a
 	github.com/fsnotify/fsnotify v1.4.9
+	github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b
+	github.com/prometheus/common v0.4.1
 	golang.org/x/net v0.0.0-20200421231249-e086a090c8fd
 	google.golang.org/grpc v1.29.0
+	k8s.io/api v0.18.2
+	k8s.io/apimachinery v0.18.2
+	k8s.io/client-go v0.18.2
 	k8s.io/kubelet v0.0.0
+	k8s.io/kubernetes v1.18.2
 )
