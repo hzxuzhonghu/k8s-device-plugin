@@ -49,6 +49,11 @@ spec:
       - image: nvidia/k8s-device-plugin:1.0.0-beta6
         name: nvidia-device-plugin-ctr
         args: ["--pass-device-specs"]
+        env:
+          - name: NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
         securityContext:
           privileged: true
         volumeMounts:

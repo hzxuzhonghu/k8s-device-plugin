@@ -25,7 +25,6 @@ const (
 	GPUAssignedConst             = "volcano.sh/gpu-assigned"
 
 	AssumedTimeEnv       = "assumed_time_env"
-	AssignedEnv          = "assigned_env"
 	ResourceIndexEnv     = "resource_index_env"
 	ContainerResourceEnv = "container_resource_env"
 )

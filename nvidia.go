@@ -38,10 +38,10 @@ type Device struct {
 
 type ResourceManager interface {
 	Devices() []*Device
-	CheckHealth(stop <-chan interface{}, devices []*Device, unhealthy chan<- *Device)
+	CheckHealth(stop <-chan struct{}, devices []*Device, unhealthy chan<- *Device)
 }
 
-type GpuDeviceManager struct {}
+type GpuDeviceManager struct{}
 
 func check(err error) {
 	if err != nil {
@@ -67,7 +67,7 @@ func (g *GpuDeviceManager) Devices() []*Device {
 	return devs
 }
 
-func (g *GpuDeviceManager) CheckHealth(stop <-chan interface{}, devices []*Device, unhealthy chan<- *Device) {
+func (g *GpuDeviceManager) CheckHealth(stop <-chan struct{}, devices []*Device, unhealthy chan<- *Device) {
 	checkHealth(stop, devices, unhealthy)
 }
 
@@ -88,7 +88,7 @@ func buildDevice(d *nvml.Device) *Device {
 	return &dev
 }
 
-func checkHealth(stop <-chan interface{}, devices []*Device, unhealthy chan<- *Device) {
+func checkHealth(stop <-chan struct{}, devices []*Device, unhealthy chan<- *Device) {
 	disableHealthChecks := strings.ToLower(os.Getenv(envDisableHealthChecks))
 	if disableHealthChecks == "all" {
 		disableHealthChecks = allHealthChecks
