@@ -54,3 +54,16 @@ centos7:
 		--tag $(REGISTRY)/k8s-device-plugin:$(VERSION)-centos7 \
 		--file docker/amd64/Dockerfile.centos7 .
 
+include Makefile.def
+
+BIN_DIR=_output/bin
+RELEASE_DIR=_output/release
+REL_OSARCH=linux/amd64
+
+init:
+	mkdir -p ${BIN_DIR}
+	mkdir -p ${RELEASE_DIR}
+
+gen_bin: init
+	go get github.com/mitchellh/gox
+	CGO_ENABLED=0 gox -osarch=${REL_OSARCH} -ldflags ${LD_FLAGS} -output ${BIN_DIR}/${REL_OSARCH}/k8s-device-plugin ./

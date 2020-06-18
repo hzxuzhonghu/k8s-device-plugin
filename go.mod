@@ -31,6 +31,8 @@ require (
 	github.com/NVIDIA/gpu-monitoring-tools v0.0.0-20200421213100-de959f43b55a
 	github.com/fsnotify/fsnotify v1.4.9
 	github.com/golang/glog v0.0.0-20160126235308-23def4e6c14b
+	github.com/karalabe/xgo v0.0.0-20191115072854-c5ccff8648a7 // indirect
+	github.com/mitchellh/gox v1.0.1 // indirect
 	github.com/prometheus/common v0.4.1
 	golang.org/x/net v0.0.0-20200421231249-e086a090c8fd
 	google.golang.org/grpc v1.29.0
