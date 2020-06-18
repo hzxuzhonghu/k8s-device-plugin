@@ -18,17 +18,15 @@ package main
 
 import (
 	"fmt"
-	"sort"
 	"strconv"
 	"strings"
 	"time"
 
 	"github.com/NVIDIA/gpu-monitoring-tools/bindings/go/nvml"
 	"github.com/prometheus/common/log"
-	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
-
-	glog "github.com/golang/glog"
 	v1 "k8s.io/api/core/v1"
+	"k8s.io/klog"
+	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
 //Container specific operations
@@ -38,7 +36,7 @@ func IsGPURequiredContainer(c *v1.Container) bool {
 	vmemory := GetGPUResourceOfContainer(c, VMemoryAnnotationConst)
 
 	if vmemory <= 0 {
-		glog.V(4).Infof("container don't need gpu resource")
+		klog.V(4).Infof("container don't need gpu resource")
 		return false
 	}
 
@@ -92,19 +90,20 @@ func GetGPUMemory() uint {
 	return gpuMemory
 }
 
-func GetDevices() ([]*pluginapi.Device, map[string]uint) {
+func GetDevices() ([]*pluginapi.Device, map[uint]string) {
 	n, err := nvml.GetDeviceCount()
 	check(err)
 
 	var devs []*pluginapi.Device
-	realDevNames := map[string]uint{}
+	deviceByIndex := map[uint]string{}
 	for i := uint(0); i < n; i++ {
 		d, err := nvml.NewDevice(i)
 		check(err)
 		var id uint
 		_, err = fmt.Sscanf(d.Path, "/dev/nvidia%d", &id)
 		check(err)
-		realDevNames[d.UUID] = id
+		deviceByIndex[id] = d.UUID
+		// TODO: Do we assume all cards are of same capacity
 		if GetGPUMemory() == uint(0) {
 			SetGPUMemory(uint(*d.Memory))
 		}
@@ -117,32 +116,23 @@ func GetDevices() ([]*pluginapi.Device, map[string]uint) {
 		}
 	}
 
-	return devs, realDevNames
+	return devs, deviceByIndex
 }
 
 //Pod specific operations
 
-type orderedPodByPredicateTime []*v1.Pod
+type podSlice []*v1.Pod
 
-func (this orderedPodByPredicateTime) Len() int {
-	return len(this)
+func (s podSlice) Len() int {
+	return len(s)
 }
 
-func (this orderedPodByPredicateTime) Less(i, j int) bool {
-	return GetPredicateTimeFromPodAnnotation(this[i]) <= GetPredicateTimeFromPodAnnotation(this[j])
+func (s podSlice) Less(i, j int) bool {
+	return GetPredicateTimeFromPodAnnotation(s[i]) <= GetPredicateTimeFromPodAnnotation(s[j])
 }
 
-func (this orderedPodByPredicateTime) Swap(i, j int) {
-	this[i], this[j] = this[j], this[i]
-}
-
-func OrderPodsByPredicateTime(pods []*v1.Pod) []*v1.Pod {
-	newPodList := make(orderedPodByPredicateTime, 0, len(pods))
-	for _, v := range pods {
-		newPodList = append(newPodList, v)
-	}
-	sort.Sort(newPodList)
-	return []*v1.Pod(newPodList)
+func (s podSlice) Swap(i, j int) {
+	s[i], s[j] = s[j], s[i]
 }
 
 func IsGPURequiredPod(pod *v1.Pod) bool {
@@ -159,12 +149,12 @@ func IsGPURequiredPod(pod *v1.Pod) bool {
 func IsGPUAssignedPod(pod *v1.Pod) bool {
 
 	if assigned, ok := pod.ObjectMeta.Annotations[GPUAssignedConst]; !ok {
-		glog.V(4).Infof("no assigned flag",
+		klog.V(4).Infof("no assigned flag",
 			pod.Name,
 			pod.Namespace)
 		return false
 	} else if assigned == "false" {
-		glog.V(4).Infof("pod has not been assigned",
+		klog.V(4).Infof("pod has not been assigned",
 			pod.Name,
 			pod.Namespace)
 		return false
@@ -208,29 +198,29 @@ func GetPredicateTimeFromPodAnnotation(pod *v1.Pod) (assumeTime uint64) {
 	return assumeTime
 }
 
-func GetGPUIDFromPodAnnotation(pod *v1.Pod) (id int) {
-
-	id = -1
-
+// GetGPUIDFromPodAnnotation returns the ID of the GPU if allocated
+func GetGPUIDFromPodAnnotation(pod *v1.Pod) (int, bool) {
 	if len(pod.ObjectMeta.Annotations) > 0 {
 		value, found := pod.ObjectMeta.Annotations[ResourceIndexEnv]
 		if found {
-			id, _ = strconv.Atoi(value)
+			id, err := strconv.Atoi(value)
+			if err != nil {
+				klog.Error("invalid ResourceIndexEnv=%s", value)
+				return 0, false
+			}
+			return id, true
 		}
 	}
 
-	return id
+	return 0, false
 }
 
-func UpdatePodAnnotations(oldPod *v1.Pod) (newPod *v1.Pod) {
-	newPod = oldPod.DeepCopy()
-	if len(newPod.ObjectMeta.Annotations) == 0 {
-		newPod.ObjectMeta.Annotations = map[string]string{}
+func UpdatePodAnnotations(pod *v1.Pod) {
+	if len(pod.ObjectMeta.Annotations) == 0 {
+		pod.ObjectMeta.Annotations = map[string]string{}
 	}
 
 	now := time.Now()
-	newPod.ObjectMeta.Annotations[AssignedEnv] = "true"
-	newPod.ObjectMeta.Annotations[AssumedTimeEnv] = fmt.Sprintf("%d", now.UnixNano())
-
-	return newPod
+	pod.ObjectMeta.Annotations[GPUAssignedConst] = "true"
+	pod.ObjectMeta.Annotations[AssumedTimeEnv] = fmt.Sprintf("%d", now.UnixNano())
 }

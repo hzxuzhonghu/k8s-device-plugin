@@ -62,7 +62,7 @@ func main() {
 	log.Println("Starting OS watcher.")
 	sigs := newOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
-	log.Println("Retreiving plugins.")
+	log.Println("Retrieving plugins.")
 	plugins := getAllPlugins()
 
 restart:
@@ -70,7 +70,6 @@ restart:
 	// them if they have any devices to serve. If even one plugin fails to
 	// start properly, try starting them all again.
 	started := 0
-	pluginStartError := make(chan struct{})
 	for _, p := range plugins {
 		p.Stop()
 
@@ -84,8 +83,8 @@ restart:
 			log.Println("Could not contact Kubelet, retrying. Did you enable the device plugin feature gate?")
 			log.Printf("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
 			log.Printf("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
-			close(pluginStartError)
-			goto events
+			// If there was an error starting any plugins, restart them all.
+			goto restart
 		}
 		started++
 	}
@@ -94,15 +93,10 @@ restart:
 		log.Println("No devices found. Waiting indefinitely.")
 	}
 
-events:
 	// Start an infinite loop, waiting for several indicators to either log
 	// some messages, trigger a restart of the plugins, or exit the program.
 	for {
 		select {
-		// If there was an error starting any plugins, restart them all.
-		case <-pluginStartError:
-			goto restart
-
 		// Detect a kubelet restart by watching for a newly created
 		// 'pluginapi.KubeletSocket' file. When this occurs, restart this loop,
 		// restarting all of the plugins in the process.
@@ -129,7 +123,7 @@ events:
 				for _, p := range plugins {
 					p.Stop()
 				}
-				break events
+				return
 			}
 		}
 	}

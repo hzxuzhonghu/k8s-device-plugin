@@ -23,11 +23,13 @@ import (
 	"net"
 	"os"
 	"path"
+	"sort"
 	"time"
 
 	"github.com/golang/glog"
 	v1 "k8s.io/api/core/v1"
 	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/klog"
 
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
@@ -46,20 +48,26 @@ type NvidiaDevicePlugin struct {
 	server        *grpc.Server
 	cachedDevices []*Device
 	health        chan *Device
-	stop          chan interface{}
+	stop          chan struct{}
 
-	devMap         map[string]uint
+	devMap         map[uint]string
 	kubeInteractor *KubeInteractor
 }
 
 // NewNvidiaDevicePlugin returns an initialized NvidiaDevicePlugin
 func NewNvidiaDevicePlugin(resourceName string, resourceManager ResourceManager, allocateEnvvar string, socket string) *NvidiaDevicePlugin {
 
+	ki, err := NewKubeInteractor()
+	if err != nil {
+		klog.Fatalf("cannot create kube interactor. %v", err)
+	}
+
 	return &NvidiaDevicePlugin{
 		ResourceManager: resourceManager,
 		resourceName:    resourceName,
 		allocateEnvvar:  allocateEnvvar,
 		socket:          socket,
+		kubeInteractor:  ki,
 
 		// These will be reinitialized every
 		// time the plugin server is restarted.
@@ -67,9 +75,7 @@ func NewNvidiaDevicePlugin(resourceName string, resourceManager ResourceManager,
 		server:        nil,
 		health:        nil,
 		stop:          nil,
-
-		devMap:         nil,
-		kubeInteractor: nil,
+		devMap:        nil,
 	}
 }
 
@@ -77,13 +83,7 @@ func (m *NvidiaDevicePlugin) initialize() {
 	m.cachedDevices = m.Devices()
 	m.server = grpc.NewServer([]grpc.ServerOption{}...)
 	m.health = make(chan *Device)
-	m.stop = make(chan interface{})
-
-	if ki, err := NewKubeInteractor(); err != nil {
-		glog.Fatalf("cannot create kube interactor. %v", err)
-	} else {
-		m.kubeInteractor = ki
-	}
+	m.stop = make(chan struct{})
 
 	_, devMap := GetDevices()
 	m.devMap = devMap
@@ -98,19 +98,14 @@ func (m *NvidiaDevicePlugin) cleanup() {
 	m.stop = nil
 
 	m.devMap = nil
-	m.kubeInteractor = nil
-
 }
 
 func (m *NvidiaDevicePlugin) GetDeviceNameByIndex(index uint) (name string, found bool) {
-	iMap := map[uint]string{}
-
-	for k, v := range m.devMap {
-		iMap[v] = k
+	if m.devMap != nil {
+		name, ok := m.devMap[index]
+		return name, ok
 	}
-
-	name, found = iMap[index]
-	return name, found
+	return "", false
 }
 
 // Start starts the gRPC server, registers the device plugin with the Kubelet,
@@ -145,7 +140,7 @@ func (m *NvidiaDevicePlugin) Stop() error {
 		return nil
 	}
 	log.Printf("Stopping to serve '%s' on %s", m.resourceName, m.socket)
-	m.server.Stop()
+	m.server.GracefulStop()
 	if err := os.Remove(m.socket); err != nil && !os.IsNotExist(err) {
 		return err
 	}
@@ -192,7 +187,7 @@ func (m *NvidiaDevicePlugin) Serve() error {
 		}
 	}()
 
-	// Wait for server to start by launching a blocking connexion
+	// Wait for server to start by launching a blocking connection
 	conn, err := m.dial(m.socket, 5*time.Second)
 	if err != nil {
 		return err
@@ -263,8 +258,8 @@ func (m *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *pluginapi.Alloc
 	firstContainerReq := reqs.ContainerRequests[0]
 	firstContainerReqDeviceCount := uint(len(firstContainerReq.DevicesIDs))
 
-	availablePods := []*v1.Pod{}
-	pendingPods, err := m.kubeInteractor.GetSpecificStatusPodsOnNode("Pending")
+	availablePods := podSlice{}
+	pendingPods, err := m.kubeInteractor.GetPendingPodsOnNode()
 	if err != nil {
 		return nil, err
 	}
@@ -275,51 +270,39 @@ func (m *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *pluginapi.Alloc
 		}
 	}
 
-	orderedPods := OrderPodsByPredicateTime(availablePods)
+	sort.Sort(availablePods)
 
-	found := false
 	var candidatePod *v1.Pod
-
-	for _, pod := range orderedPods {
-		if found {
-			break
-		}
+	for _, pod := range availablePods {
 		for i, c := range pod.Spec.Containers {
 			if !IsGPURequiredContainer(&c) {
 				continue
 			}
 
+			// TODO: is this right?
 			if GetGPUResourceOfContainer(&pod.Spec.Containers[i], VCoreAnnotationConst) == firstContainerReqDeviceCount {
 				glog.Infof("Got candidate Pod %s(%s), the device count is: %d", pod.UID, c.Name, firstContainerReqDeviceCount)
 				candidatePod = pod
-				found = true
 				break
 			}
 		}
 	}
 
-	if found {
-		id := GetGPUIDFromPodAnnotation(candidatePod)
-		if id < 0 {
-			glog.Warningf("Failed to get the dev ", candidatePod)
+	if candidatePod != nil {
+		id, exist := GetGPUIDFromPodAnnotation(candidatePod)
+		if !exist {
+			klog.Warningf("Failed to get the gpu id for pod %s/%s", candidatePod.Namespace, candidatePod.Name)
+			return genResponse(reqs, reqCount), nil
 		}
-
-		if id >= 0 {
-			_, ok := m.GetDeviceNameByIndex(uint(id))
-			if !ok {
-				glog.Warningf("Failed to find the dev for pod %v because it's not able to find dev with index %d",
-					candidatePod,
-					id)
-				id = -1
-			}
-		}
-
-		if id < 0 {
+		_, exist = m.GetDeviceNameByIndex(uint(id))
+		if !exist {
+			klog.Warningf("Failed to find the dev for pod %s/%s because it's not able to find dev with index %d",
+				candidatePod.Namespace, candidatePod.Name, id)
 			return genResponse(reqs, reqCount), nil
 		}
 
 		for _, req := range reqs.ContainerRequests {
-			reqGPU := uint(len(req.DevicesIDs))
+			reqGPU := len(req.DevicesIDs)
 			response := pluginapi.ContainerAllocateResponse{
 				//TODO: (tizhou86) Add envs into response
 				Envs: map[string]string{
@@ -329,14 +312,12 @@ func (m *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *pluginapi.Alloc
 			responses.ContainerResponses = append(responses.ContainerResponses, &response)
 		}
 
-		newPod := UpdatePodAnnotations(candidatePod)
-
 		pod, err := m.kubeInteractor.clientset.CoreV1().Pods(candidatePod.Namespace).Get(context.TODO(), candidatePod.Name, metav1.GetOptions{})
 		if err != nil {
 			return genResponse(reqs, reqCount), nil
 		}
-		newPod = UpdatePodAnnotations(pod)
-		_, err = m.kubeInteractor.clientset.CoreV1().Pods(newPod.Namespace).Update(context.TODO(), newPod, metav1.UpdateOptions{})
+		UpdatePodAnnotations(pod)
+		_, err = m.kubeInteractor.clientset.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, metav1.UpdateOptions{})
 		if err != nil {
 			return genResponse(reqs, reqCount), nil
 		}

@@ -48,6 +48,11 @@ spec:
       containers:
       - image: nvidia/k8s-device-plugin:1.0.0-beta6
         name: nvidia-device-plugin-ctr
+        env:
+          - name: NODE_NAME
+            valueFrom:
+              fieldRef:
+                fieldPath: spec.nodeName
         securityContext:
           allowPrivilegeEscalation: false
           capabilities:
