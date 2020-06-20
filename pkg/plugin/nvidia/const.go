@@ -14,9 +14,10 @@
  * limitations under the License.
  */
 
-package main
+package nvidia
 
 const (
+	// GPU card core num
 	GpuCoreConst = "volcano.sh/gpu-core"
 
 	VCoreAnnotationConst         = "volcano.sh/vcuda-core"

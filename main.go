@@ -20,26 +20,30 @@ import (
 	"flag"
 	"log"
 	"os"
+	"os/signal"
 	"syscall"
 
 	"github.com/NVIDIA/gpu-monitoring-tools/bindings/go/nvml"
 	"github.com/fsnotify/fsnotify"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
+
+	"volcano.sh/k8s-device-plugin/pkg/filewatcher"
+	"volcano.sh/k8s-device-plugin/pkg/plugin/nvidia"
 )
 
-func getAllPlugins() []*NvidiaDevicePlugin {
-	return []*NvidiaDevicePlugin{
-		NewNvidiaDevicePlugin(
+func getAllPlugins() []*nvidia.NvidiaDevicePlugin {
+	return []*nvidia.NvidiaDevicePlugin{
+		nvidia.NewNvidiaDevicePlugin(
 			"nvidia.com/gpu",
-			NewGpuDeviceManager(),
 			"NVIDIA_VISIBLE_DEVICES",
-			pluginapi.DevicePluginPath + "nvidia.sock"),
+			pluginapi.DevicePluginPath+"nvidia.sock"),
 	}
 }
 
 func main() {
 	flag.Parse()
 
+	// TODO: move this down into nvidia device plugin
 	log.Println("Loading NVML")
 	if err := nvml.Init(); err != nil {
 		log.Printf("Failed to initialize NVML: %s.", err)
@@ -52,7 +56,7 @@ func main() {
 	defer func() { log.Println("Shutdown of NVML returned:", nvml.Shutdown()) }()
 
 	log.Println("Starting FS watcher.")
-	watcher, err := newFSWatcher(pluginapi.DevicePluginPath)
+	watcher, err := filewatcher.NewFSWatcher(pluginapi.DevicePluginPath)
 	if err != nil {
 		log.Println("Failed to created FS watcher.")
 		os.Exit(1)
@@ -60,7 +64,8 @@ func main() {
 	defer watcher.Close()
 
 	log.Println("Starting OS watcher.")
-	sigs := newOSWatcher(syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
 	log.Println("Retrieving plugins.")
 	plugins := getAllPlugins()
@@ -113,7 +118,7 @@ restart:
 		// Watch for any signals from the OS. On SIGHUP, restart this loop,
 		// restarting all of the plugins in the process. On all other
 		// signals, exit the loop and exit the program.
-		case s := <-sigs:
+		case s := <-sigCh:
 			switch s {
 			case syscall.SIGHUP:
 				log.Println("Received SIGHUP, restarting.")
