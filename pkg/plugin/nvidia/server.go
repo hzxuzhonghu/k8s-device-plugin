@@ -17,7 +17,6 @@ limitations under the License.
 package nvidia
 
 import (
-	"flag"
 	"fmt"
 	"log"
 	"net"
@@ -28,15 +27,12 @@ import (
 
 	"github.com/golang/glog"
 	v1 "k8s.io/api/core/v1"
-	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
 	"k8s.io/klog"
 
 	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
-
-var passDeviceSpecs = flag.Bool("pass-device-specs", false, "pass the list of DeviceSpecs to the kubelet on Allocate()")
 
 // NvidiaDevicePlugin implements the Kubernetes device plugin API
 type NvidiaDevicePlugin struct {
@@ -45,12 +41,16 @@ type NvidiaDevicePlugin struct {
 	allocateEnvvar string
 	socket         string
 
-	server        *grpc.Server
-	cachedDevices []*Device
-	health        chan *Device
-	stop          chan struct{}
+	server *grpc.Server
+	// Physical gpu card
+	physicalDevices []*Device
+	health          chan *Device
+	stop            chan struct{}
 
-	devMap         map[uint]string
+	// Virtual devices
+	virtualDevices []*pluginapi.Device
+	devicesByIndex map[uint]string
+
 	kubeInteractor *KubeInteractor
 }
 
@@ -71,38 +71,37 @@ func NewNvidiaDevicePlugin(resourceName string, allocateEnvvar string, socket st
 
 		// These will be reinitialized every
 		// time the plugin server is restarted.
-		cachedDevices: nil,
-		server:        nil,
-		health:        nil,
-		stop:          nil,
-		devMap:        nil,
+		physicalDevices: nil,
+		server:          nil,
+		health:          nil,
+		stop:            nil,
+		virtualDevices:  nil,
+		devicesByIndex:  nil,
 	}
 }
 
 func (m *NvidiaDevicePlugin) initialize() {
-	m.cachedDevices = m.Devices()
+	m.physicalDevices = m.Devices()
 	m.server = grpc.NewServer([]grpc.ServerOption{}...)
 	m.health = make(chan *Device)
 	m.stop = make(chan struct{})
 
-	_, devMap := GetDevices()
-	m.devMap = devMap
-
+	m.virtualDevices, m.devicesByIndex = GetDevices()
 }
 
 func (m *NvidiaDevicePlugin) cleanup() {
 	close(m.stop)
-	m.cachedDevices = nil
+	m.physicalDevices = nil
 	m.server = nil
 	m.health = nil
 	m.stop = nil
 
-	m.devMap = nil
+	m.devicesByIndex = nil
 }
 
 func (m *NvidiaDevicePlugin) GetDeviceNameByIndex(index uint) (name string, found bool) {
-	if m.devMap != nil {
-		name, ok := m.devMap[index]
+	if m.devicesByIndex != nil {
+		name, ok := m.devicesByIndex[index]
 		return name, ok
 	}
 	return "", false
@@ -112,6 +111,12 @@ func (m *NvidiaDevicePlugin) GetDeviceNameByIndex(index uint) (name string, foun
 // and starts the device healthchecks.
 func (m *NvidiaDevicePlugin) Start() error {
 	m.initialize()
+	// must be called after initialize
+	if err := m.kubeInteractor.PatchGPUResourceOnNode(len(m.virtualDevices)); err != nil {
+		log.Printf("failed to patch gpu resource: %v", err)
+		m.cleanup()
+		return fmt.Errorf("failed to patch gpu resource: %v", err)
+	}
 
 	err := m.Serve()
 	if err != nil {
@@ -129,7 +134,7 @@ func (m *NvidiaDevicePlugin) Start() error {
 	}
 	log.Printf("Registered device plugin for '%s' with Kubelet", m.resourceName)
 
-	go m.CheckHealth(m.stop, m.cachedDevices, m.health)
+	go m.CheckHealth(m.stop, m.physicalDevices, m.health)
 
 	return nil
 }
@@ -229,7 +234,7 @@ func (m *NvidiaDevicePlugin) GetDevicePluginOptions(context.Context, *pluginapi.
 
 // ListAndWatch lists devices and update that list according to the health status
 func (m *NvidiaDevicePlugin) ListAndWatch(e *pluginapi.Empty, s pluginapi.DevicePlugin_ListAndWatchServer) error {
-	s.Send(&pluginapi.ListAndWatchResponse{Devices: m.apiDevices()})
+	s.Send(&pluginapi.ListAndWatchResponse{Devices: m.virtualDevices})
 
 	for {
 		select {
@@ -239,22 +244,17 @@ func (m *NvidiaDevicePlugin) ListAndWatch(e *pluginapi.Empty, s pluginapi.Device
 			// FIXME: there is no way to recover from the Unhealthy state.
 			d.Health = pluginapi.Unhealthy
 			log.Printf("'%s' device marked unhealthy: %s", m.resourceName, d.ID)
-			s.Send(&pluginapi.ListAndWatchResponse{Devices: m.apiDevices()})
+			s.Send(&pluginapi.ListAndWatchResponse{Devices: m.virtualDevices})
 		}
 	}
 }
 
+// TODO(@hzxuzhonghu): This is called per container by kubelet, we do not handle multi containers pod case correctly.
 // Allocate which return list of devices.
 func (m *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *pluginapi.AllocateRequest) (*pluginapi.AllocateResponse, error) {
-
 	var reqCount uint
-
 	for _, req := range reqs.ContainerRequests {
 		reqCount += uint(len(req.DevicesIDs))
-	}
-
-	if len(reqs.ContainerRequests) == 0 {
-		return nil, fmt.Errorf("No container request")
 	}
 
 	responses := pluginapi.AllocateResponse{}
@@ -283,51 +283,47 @@ func (m *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *pluginapi.Alloc
 				continue
 			}
 
-			// TODO: is this right?
-			if GetGPUResourceOfContainer(&pod.Spec.Containers[i], VCoreAnnotationConst) == firstContainerReqDeviceCount {
+			if GetGPUResourceOfContainer(&pod.Spec.Containers[i]) == firstContainerReqDeviceCount {
 				glog.Infof("Got candidate Pod %s(%s), the device count is: %d", pod.UID, c.Name, firstContainerReqDeviceCount)
 				candidatePod = pod
-				break
+				goto Allocate
 			}
 		}
 	}
 
-	if candidatePod != nil {
-		id, exist := GetGPUIDFromPodAnnotation(candidatePod)
-		if !exist {
-			klog.Warningf("Failed to get the gpu id for pod %s/%s", candidatePod.Namespace, candidatePod.Name)
-			return genResponse(reqs, reqCount), nil
-		}
-		_, exist = m.GetDeviceNameByIndex(uint(id))
-		if !exist {
-			klog.Warningf("Failed to find the dev for pod %s/%s because it's not able to find dev with index %d",
-				candidatePod.Namespace, candidatePod.Name, id)
-			return genResponse(reqs, reqCount), nil
-		}
+	if candidatePod == nil {
+		return nil, fmt.Errorf("failed to find candidate pod")
+	}
 
-		for _, req := range reqs.ContainerRequests {
-			reqGPU := len(req.DevicesIDs)
-			response := pluginapi.ContainerAllocateResponse{
-				//TODO: (tizhou86) Add envs into response
-				Envs: map[string]string{
-					ContainerResourceEnv: fmt.Sprintf("%d", reqGPU),
-				},
-			}
-			responses.ContainerResponses = append(responses.ContainerResponses, &response)
-		}
+Allocate:
+	id := GetGPUIDFromPodAnnotation(candidatePod)
+	if id < 0 {
+		klog.Warningf("Failed to get the gpu id for pod %s/%s", candidatePod.Namespace, candidatePod.Name)
+		return nil, fmt.Errorf("failed to find gpu id")
+	}
+	_, exist := m.GetDeviceNameByIndex(uint(id))
+	if !exist {
+		klog.Warningf("Failed to find the dev for pod %s/%s because it's not able to find dev with index %d",
+			candidatePod.Namespace, candidatePod.Name, id)
+		return nil, fmt.Errorf("failed to find gpu device")
+	}
 
-		pod, err := m.kubeInteractor.clientset.CoreV1().Pods(candidatePod.Namespace).Get(context.TODO(), candidatePod.Name, metav1.GetOptions{})
-		if err != nil {
-			return genResponse(reqs, reqCount), nil
+	for _, req := range reqs.ContainerRequests {
+		reqGPU := len(req.DevicesIDs)
+		response := pluginapi.ContainerAllocateResponse{
+			//TODO: (tizhou86) Add envs into response
+			Envs: map[string]string{
+				m.allocateEnvvar:     fmt.Sprintf("%d", id),
+				AllocatedGPUResource: fmt.Sprintf("%d", reqGPU),
+				TotalGPUResource:     fmt.Sprintf("%d", gpuMemory),
+			},
 		}
-		UpdatePodAnnotations(pod)
-		_, err = m.kubeInteractor.clientset.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, metav1.UpdateOptions{})
-		if err != nil {
-			return genResponse(reqs, reqCount), nil
-		}
+		responses.ContainerResponses = append(responses.ContainerResponses, &response)
+	}
 
-	} else {
-		return genResponse(reqs, reqCount), nil
+	err = UpdatePodAnnotations(m.kubeInteractor.clientset, candidatePod)
+	if err != nil {
+		return nil, fmt.Errorf("failed to update pod annotation %v", err)
 	}
 
 	return &responses, nil
@@ -355,7 +351,7 @@ func (m *NvidiaDevicePlugin) dial(unixSocketPath string, timeout time.Duration) 
 }
 
 func (m *NvidiaDevicePlugin) deviceExists(id string) bool {
-	for _, d := range m.cachedDevices {
+	for _, d := range m.physicalDevices {
 		if d.ID == id {
 			return true
 		}
@@ -365,7 +361,7 @@ func (m *NvidiaDevicePlugin) deviceExists(id string) bool {
 
 func (m *NvidiaDevicePlugin) apiDevices() []*pluginapi.Device {
 	var pdevs []*pluginapi.Device
-	for _, d := range m.cachedDevices {
+	for _, d := range m.physicalDevices {
 		pdevs = append(pdevs, &d.Device)
 	}
 	return pdevs
@@ -392,7 +388,7 @@ func (m *NvidiaDevicePlugin) apiDeviceSpecs(filter []string) []*pluginapi.Device
 		}
 	}
 
-	for _, d := range m.cachedDevices {
+	for _, d := range m.physicalDevices {
 		for _, id := range filter {
 			if d.ID == id {
 				spec := &pluginapi.DeviceSpec{
@@ -406,18 +402,4 @@ func (m *NvidiaDevicePlugin) apiDeviceSpecs(filter []string) []*pluginapi.Device
 	}
 
 	return specs
-}
-
-func genResponse(reqs *pluginapi.AllocateRequest, podReqGPU uint) *pluginapi.AllocateResponse {
-	responses := pluginapi.AllocateResponse{}
-	for _, req := range reqs.ContainerRequests {
-		response := pluginapi.ContainerAllocateResponse{
-			//TODO: (tizhou86) Add envs into response
-			Envs: map[string]string{
-				ContainerResourceEnv: fmt.Sprintf("%d", uint(len(req.DevicesIDs))),
-			},
-		}
-		responses.ContainerResponses = append(responses.ContainerResponses, &response)
-	}
-	return &responses
 }

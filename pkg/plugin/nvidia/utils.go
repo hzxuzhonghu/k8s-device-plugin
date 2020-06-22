@@ -17,7 +17,9 @@
 package nvidia
 
 import (
+	"context"
 	"fmt"
+	"math"
 	"strconv"
 	"strings"
 	"time"
@@ -25,27 +27,26 @@ import (
 	"github.com/NVIDIA/gpu-monitoring-tools/bindings/go/nvml"
 	"github.com/prometheus/common/log"
 	v1 "k8s.io/api/core/v1"
+	metav1 "k8s.io/apimachinery/pkg/apis/meta/v1"
+	"k8s.io/client-go/kubernetes"
 	"k8s.io/klog"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
 
-//Container specific operations
+// Container specific operations
 
 func IsGPURequiredContainer(c *v1.Container) bool {
-
-	vmemory := GetGPUResourceOfContainer(c, VMemoryAnnotationConst)
-
-	if vmemory <= 0 {
-		klog.V(4).Infof("container don't need gpu resource")
+	vmemory := GetGPUResourceOfContainer(c)
+	if vmemory == 0 {
 		return false
 	}
 
 	return true
 }
 
-func GetGPUResourceOfContainer(container *v1.Container, resourceName v1.ResourceName) uint {
+func GetGPUResourceOfContainer(container *v1.Container) uint {
 	var count uint
-	if val, ok := container.Resources.Limits[resourceName]; ok {
+	if val, ok := container.Resources.Limits[VolcanoGPUResource]; ok {
 		count = uint(val.Value())
 	}
 	return count
@@ -66,13 +67,13 @@ func GetContainerIndexByName(pod *v1.Pod, containerName string) (int, error) {
 	return containerIndex, nil
 }
 
-////Device specific operations
+// Device specific operations
 
 var (
 	gpuMemory uint
 )
 
-func GenerateFakeDeviceID(realID string, fakeCounter uint) string {
+func GenerateVirtualDeviceID(realID string, fakeCounter uint) string {
 	return fmt.Sprintf("%s-_-%d", realID, fakeCounter)
 }
 
@@ -90,11 +91,12 @@ func GetGPUMemory() uint {
 	return gpuMemory
 }
 
+// GetDevices returns virtual devices and all physical devices by index.
 func GetDevices() ([]*pluginapi.Device, map[uint]string) {
 	n, err := nvml.GetDeviceCount()
 	check(err)
 
-	var devs []*pluginapi.Device
+	var virtualDevs []*pluginapi.Device
 	deviceByIndex := map[uint]string{}
 	for i := uint(0); i < n; i++ {
 		d, err := nvml.NewDevice(i)
@@ -108,18 +110,18 @@ func GetDevices() ([]*pluginapi.Device, map[uint]string) {
 			SetGPUMemory(uint(*d.Memory))
 		}
 		for j := uint(0); j < GetGPUMemory(); j++ {
-			fakeID := GenerateFakeDeviceID(d.UUID, j)
-			devs = append(devs, &pluginapi.Device{
+			fakeID := GenerateVirtualDeviceID(d.UUID, j)
+			virtualDevs = append(virtualDevs, &pluginapi.Device{
 				ID:     fakeID,
 				Health: pluginapi.Healthy,
 			})
 		}
 	}
 
-	return devs, deviceByIndex
+	return virtualDevs, deviceByIndex
 }
 
-//Pod specific operations
+// Pod specific operations
 
 type podSlice []*v1.Pod
 
@@ -137,7 +139,7 @@ func (s podSlice) Swap(i, j int) {
 
 func IsGPURequiredPod(pod *v1.Pod) bool {
 
-	vmemory := GetGPUResourceOfPod(pod, VMemoryAnnotationConst)
+	vmemory := GetGPUResourceOfPod(pod, VolcanoGPUResource)
 
 	if vmemory <= 0 {
 		return false
@@ -148,7 +150,7 @@ func IsGPURequiredPod(pod *v1.Pod) bool {
 
 func IsGPUAssignedPod(pod *v1.Pod) bool {
 
-	if assigned, ok := pod.ObjectMeta.Annotations[GPUAssignedConst]; !ok {
+	if assigned, ok := pod.ObjectMeta.Annotations[GPUAssigned]; !ok {
 		klog.V(4).Infof("no assigned flag",
 			pod.Name,
 			pod.Namespace)
@@ -164,6 +166,9 @@ func IsGPUAssignedPod(pod *v1.Pod) bool {
 }
 
 func IsShouldDeletePod(pod *v1.Pod) bool {
+	if pod.DeletionTimestamp != nil {
+		return true
+	}
 	for _, status := range pod.Status.ContainerStatuses {
 		if status.State.Waiting != nil &&
 			strings.Contains(status.State.Waiting.Message, "PreStartContainer check failed") {
@@ -187,40 +192,47 @@ func GetGPUResourceOfPod(pod *v1.Pod, resourceName v1.ResourceName) uint {
 	return total
 }
 
-func GetPredicateTimeFromPodAnnotation(pod *v1.Pod) (assumeTime uint64) {
-	if assumeTimeStr, ok := pod.ObjectMeta.Annotations[AssumedTimeEnv]; ok {
-		u64, err := strconv.ParseUint(assumeTimeStr, 10, 64)
+func GetPredicateTimeFromPodAnnotation(pod *v1.Pod) uint64 {
+	if assumeTimeStr, ok := pod.Annotations[PredicateTime]; ok {
+		predicateTime, err := strconv.ParseUint(assumeTimeStr, 10, 64)
 		if err == nil {
-			assumeTime = u64
+			return predicateTime
 		}
 	}
 
-	return assumeTime
+	return math.MaxUint64
 }
 
 // GetGPUIDFromPodAnnotation returns the ID of the GPU if allocated
-func GetGPUIDFromPodAnnotation(pod *v1.Pod) (int, bool) {
-	if len(pod.ObjectMeta.Annotations) > 0 {
-		value, found := pod.ObjectMeta.Annotations[ResourceIndexEnv]
+func GetGPUIDFromPodAnnotation(pod *v1.Pod) int {
+	if len(pod.Annotations) > 0 {
+		value, found := pod.Annotations[GPUIndex]
 		if found {
 			id, err := strconv.Atoi(value)
 			if err != nil {
-				klog.Error("invalid ResourceIndexEnv=%s", value)
-				return 0, false
+				klog.Error("invalid %s=%s", GPUIndex, value)
+				return -1
 			}
-			return id, true
+			return id
 		}
 	}
 
-	return 0, false
+	return -1
 }
 
-func UpdatePodAnnotations(pod *v1.Pod) {
-	if len(pod.ObjectMeta.Annotations) == 0 {
-		pod.ObjectMeta.Annotations = map[string]string{}
+func UpdatePodAnnotations(kubeClient *kubernetes.Clientset, pod *v1.Pod) error {
+	pod, err := kubeClient.CoreV1().Pods(pod.Namespace).Get(context.TODO(), pod.Name, metav1.GetOptions{})
+	if err != nil {
+		return err
+	}
+	if len(pod.Annotations) == 0 {
+		pod.Annotations = map[string]string{}
 	}
 
-	now := time.Now()
-	pod.ObjectMeta.Annotations[GPUAssignedConst] = "true"
-	pod.ObjectMeta.Annotations[AssumedTimeEnv] = fmt.Sprintf("%d", now.UnixNano())
+	pod.Annotations[GPUAssigned] = "true"
+	pod.Annotations[GPUAssignedTime] = fmt.Sprintf("%d", time.Now().UnixNano())
+
+	// TODO(@hzxuzhonghu): use patch instead
+	_, err = kubeClient.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, metav1.UpdateOptions{})
+	return err
 }

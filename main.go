@@ -28,13 +28,14 @@ import (
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 
 	"volcano.sh/k8s-device-plugin/pkg/filewatcher"
+	"volcano.sh/k8s-device-plugin/pkg/plugin"
 	"volcano.sh/k8s-device-plugin/pkg/plugin/nvidia"
 )
 
-func getAllPlugins() []*nvidia.NvidiaDevicePlugin {
-	return []*nvidia.NvidiaDevicePlugin{
+func getAllPlugins() []plugin.DevicePlugin {
+	return []plugin.DevicePlugin{
 		nvidia.NewNvidiaDevicePlugin(
-			"nvidia.com/gpu",
+			nvidia.VolcanoGPUResource,
 			"NVIDIA_VISIBLE_DEVICES",
 			pluginapi.DevicePluginPath+"nvidia.sock"),
 	}
@@ -79,7 +80,7 @@ restart:
 		p.Stop()
 
 		// Just continue if there are no devices to serve for plugin p.
-		if len(p.Devices()) == 0 {
+		if p.DevicesNum() == 0 {
 			continue
 		}
 

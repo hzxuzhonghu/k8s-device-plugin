@@ -17,15 +17,21 @@
 package nvidia
 
 const (
-	// GPU card core num
-	GpuCoreConst = "volcano.sh/gpu-core"
 
-	VCoreAnnotationConst         = "volcano.sh/vcuda-core"
-	VMemoryAnnotationConst       = "volcano.sh/vcuda-memory"
-	PredicateTimeAnnotationConst = "volcano.sh/predicate-time"
-	GPUAssignedConst             = "volcano.sh/gpu-assigned"
+	// Extended gpu resource
+	VolcanoGPUResource = "volcano.sh/gpu-memory"
+	// Virtual GPU card number
+	VolcanoGPUNumber = "volcano.sh/gpu-number"
 
-	AssumedTimeEnv       = "assumed_time_env"
-	ResourceIndexEnv     = "resource_index_env"
-	ContainerResourceEnv = "container_resource_env"
+	// Annotation
+	PredicateTime   = "volcano.sh/predicate-time"
+	GPUAssigned     = "volcano.sh/gpu-assigned"
+	GPUAssignedTime = "volcano.sh/gpu-assigned-time"
+	GPUIndex        = "volcano.sh/gpu-index"
+
+	// Container env
+	// Allocated gpu memory
+	AllocatedGPUResource = "VOLCANO_GPU_ALLOCATED"
+	// Total gpu mem
+	TotalGPUResource = "TOTAL_GPU"
 )

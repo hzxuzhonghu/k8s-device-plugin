@@ -56,7 +56,7 @@ func NewKubeClient() (*kubernetes.Clientset, error) {
 func NewKubeInteractor() (*KubeInteractor, error) {
 	client, err := NewKubeClient()
 	if err != nil {
-		return nil, fmt.Errorf("cannot create kube client: %v", err)
+		return nil, fmt.Errorf("failed to create kube client: %v", err)
 	}
 
 	return &KubeInteractor{
@@ -92,36 +92,24 @@ func (ki *KubeInteractor) GetPendingPodsOnNode() ([]v1.Pod, error) {
 	return res, nil
 }
 
-func (ki *KubeInteractor) PatchGPUCountOnNode(gpuCount int) error {
-
-	var (
-		node *v1.Node
-		err  error
-	)
-
+func (ki *KubeInteractor) PatchGPUResourceOnNode(gpuCount int) error {
+	var err error
 	err = wait.PollImmediate(1*time.Second, 10*time.Second, func() (bool, error) {
+		var node *v1.Node
 		node, err = ki.clientset.CoreV1().Nodes().Get(context.TODO(), ki.nodeName, metav1.GetOptions{})
-
 		if err != nil {
-			return false, err
+			return false, nil
+		}
+
+		newNode := node.DeepCopy()
+		newNode.Status.Capacity[VolcanoGPUNumber] = *resource.NewQuantity(int64(gpuCount), resource.DecimalSI)
+		newNode.Status.Allocatable[VolcanoGPUNumber] = *resource.NewQuantity(int64(gpuCount), resource.DecimalSI)
+		_, _, err = nodeutil.PatchNodeStatus(ki.clientset.CoreV1(), types.NodeName(ki.nodeName), node, newNode)
+		if err != nil {
+			klog.Info("failed to patch volcano gpu resource")
+			return false, nil
 		}
 		return true, nil
 	})
-
-	if err != nil {
-		return fmt.Errorf("kube interactor timedout: %v", err)
-	}
-
-	newNode := node.DeepCopy()
-	newNode.Status.Capacity[GpuCoreConst] = *resource.NewQuantity(int64(gpuCount), resource.DecimalSI)
-	newNode.Status.Allocatable[GpuCoreConst] = *resource.NewQuantity(int64(gpuCount), resource.DecimalSI)
-	_, _, err = nodeutil.PatchNodeStatus(ki.clientset.CoreV1(), types.NodeName(ki.nodeName), node, newNode)
-
-	if err != nil {
-		klog.Infof("failed to update %s.", GpuCoreConst)
-		return err
-	}
-
-	return nil
-
+	return err
 }
