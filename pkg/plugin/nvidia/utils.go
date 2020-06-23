@@ -22,7 +22,6 @@ import (
 	"math"
 	"strconv"
 	"strings"
-	"time"
 
 	"github.com/NVIDIA/gpu-monitoring-tools/bindings/go/nvml"
 	"github.com/prometheus/common/log"
@@ -150,12 +149,15 @@ func IsGPURequiredPod(pod *v1.Pod) bool {
 
 func IsGPUAssignedPod(pod *v1.Pod) bool {
 
-	if assigned, ok := pod.ObjectMeta.Annotations[GPUAssigned]; !ok {
+	assigned, ok := pod.ObjectMeta.Annotations[GPUAssigned]
+	if !ok {
 		klog.V(4).Infof("no assigned flag",
 			pod.Name,
 			pod.Namespace)
 		return false
-	} else if assigned == "false" {
+	}
+
+	if assigned == "false" {
 		klog.V(4).Infof("pod has not been assigned",
 			pod.Name,
 			pod.Namespace)
@@ -230,7 +232,6 @@ func UpdatePodAnnotations(kubeClient *kubernetes.Clientset, pod *v1.Pod) error {
 	}
 
 	pod.Annotations[GPUAssigned] = "true"
-	pod.Annotations[GPUAssignedTime] = fmt.Sprintf("%d", time.Now().UnixNano())
 
 	// TODO(@hzxuzhonghu): use patch instead
 	_, err = kubeClient.CoreV1().Pods(pod.Namespace).Update(context.TODO(), pod, metav1.UpdateOptions{})

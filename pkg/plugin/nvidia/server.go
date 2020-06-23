@@ -112,7 +112,7 @@ func (m *NvidiaDevicePlugin) GetDeviceNameByIndex(index uint) (name string, foun
 func (m *NvidiaDevicePlugin) Start() error {
 	m.initialize()
 	// must be called after initialize
-	if err := m.kubeInteractor.PatchGPUResourceOnNode(len(m.virtualDevices)); err != nil {
+	if err := m.kubeInteractor.PatchGPUResourceOnNode(len(m.physicalDevices)); err != nil {
 		log.Printf("failed to patch gpu resource: %v", err)
 		m.cleanup()
 		return fmt.Errorf("failed to patch gpu resource: %v", err)

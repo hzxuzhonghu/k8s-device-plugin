@@ -24,10 +24,9 @@ const (
 	VolcanoGPUNumber = "volcano.sh/gpu-number"
 
 	// Annotation
-	PredicateTime   = "volcano.sh/predicate-time"
-	GPUAssigned     = "volcano.sh/gpu-assigned"
-	GPUAssignedTime = "volcano.sh/gpu-assigned-time"
-	GPUIndex        = "volcano.sh/gpu-index"
+	PredicateTime = "volcano.sh/predicate-time"
+	GPUAssigned   = "volcano.sh/gpu-assigned"
+	GPUIndex      = "volcano.sh/gpu-index"
 
 	// Container env
 	// Allocated gpu memory
