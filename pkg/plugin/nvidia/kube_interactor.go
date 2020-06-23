@@ -98,6 +98,7 @@ func (ki *KubeInteractor) PatchGPUResourceOnNode(gpuCount int) error {
 		var node *v1.Node
 		node, err = ki.clientset.CoreV1().Nodes().Get(context.TODO(), ki.nodeName, metav1.GetOptions{})
 		if err != nil {
+			klog.Info("failed to get node %s: %v", ki.nodeName, err)
 			return false, nil
 		}
 
@@ -106,7 +107,7 @@ func (ki *KubeInteractor) PatchGPUResourceOnNode(gpuCount int) error {
 		newNode.Status.Allocatable[VolcanoGPUNumber] = *resource.NewQuantity(int64(gpuCount), resource.DecimalSI)
 		_, _, err = nodeutil.PatchNodeStatus(ki.clientset.CoreV1(), types.NodeName(ki.nodeName), node, newNode)
 		if err != nil {
-			klog.Info("failed to patch volcano gpu resource")
+			klog.Infof("failed to patch volcano gpu resource: %v", err)
 			return false, nil
 		}
 		return true, nil
