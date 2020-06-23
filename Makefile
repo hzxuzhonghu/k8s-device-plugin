@@ -19,7 +19,7 @@
 ##### Global variables #####
 
 DOCKER   ?= docker
-REGISTRY ?= nvidia
+REGISTRY ?= volcanosh
 VERSION  ?= 1.0.0-beta6
 
 ##### Public rules #####

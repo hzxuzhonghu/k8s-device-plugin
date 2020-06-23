@@ -37,7 +37,7 @@ spec:
       # See https://kubernetes.io/docs/tasks/administer-cluster/guaranteed-scheduling-critical-addon-pods/
       - key: CriticalAddonsOnly
         operator: Exists
-      - key: nvidia.com/gpu
+      - key: volcano.sh/gpu-memory
         operator: Exists
         effect: NoSchedule
       # Mark this pod as a critical add-on; when enabled, the critical add-on
