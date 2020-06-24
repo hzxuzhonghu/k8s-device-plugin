@@ -145,7 +145,7 @@ func (m *NvidiaDevicePlugin) Stop() error {
 		return nil
 	}
 	log.Printf("Stopping to serve '%s' on %s", m.resourceName, m.socket)
-	m.server.GracefulStop()
+	m.server.Stop()
 	if err := os.Remove(m.socket); err != nil && !os.IsNotExist(err) {
 		return err
 	}
