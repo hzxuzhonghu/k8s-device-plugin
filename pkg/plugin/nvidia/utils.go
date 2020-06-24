@@ -72,12 +72,12 @@ var (
 	gpuMemory uint
 )
 
-func GenerateVirtualDeviceID(realID string, fakeCounter uint) string {
-	return fmt.Sprintf("%s-_-%d", realID, fakeCounter)
+func GenerateVirtualDeviceID(id uint, fakeCounter uint) string {
+	return fmt.Sprintf("%d-%d", id, fakeCounter)
 }
 
 func ExtractRealDeviceID(fakeDeviceID string) string {
-	return strings.Split(fakeDeviceID, "-_-")[0]
+	return strings.Split(fakeDeviceID, "-")[0]
 }
 
 func SetGPUMemory(raw uint) {
@@ -109,7 +109,7 @@ func GetDevices() ([]*pluginapi.Device, map[uint]string) {
 			SetGPUMemory(uint(*d.Memory))
 		}
 		for j := uint(0); j < GetGPUMemory(); j++ {
-			fakeID := GenerateVirtualDeviceID(d.UUID, j)
+			fakeID := GenerateVirtualDeviceID(id, j)
 			virtualDevs = append(virtualDevs, &pluginapi.Device{
 				ID:     fakeID,
 				Health: pluginapi.Healthy,
