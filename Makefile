@@ -24,12 +24,11 @@ VERSION  ?= 1.0.0-beta6
 
 ##### Public rules #####
 
-all: ubuntu16.04 centos7 ubi8
+all: ubuntu16.04 centos7
 
 push:
 	$(DOCKER) push "$(REGISTRY)/k8s-device-plugin:$(VERSION)-ubuntu16.04"
 	$(DOCKER) push "$(REGISTRY)/k8s-device-plugin:$(VERSION)-centos7"
-	$(DOCKER) push "$(REGISTRY)/k8s-device-plugin:$(VERSION)-ubi8"
 
 push-short:
 	$(DOCKER) tag "$(REGISTRY)/k8s-device-plugin:$(VERSION)-ubuntu16.04" "$(REGISTRY)/k8s-device-plugin:$(VERSION)"
@@ -43,11 +42,6 @@ ubuntu16.04:
 	$(DOCKER) build --pull \
 		--tag $(REGISTRY)/k8s-device-plugin:$(VERSION)-ubuntu16.04 \
 		--file docker/amd64/Dockerfile.ubuntu16.04 .
-
-ubi8:
-	$(DOCKER) build --pull \
-		--tag $(REGISTRY)/k8s-device-plugin:$(VERSION)-ubi8 \
-		--file docker/amd64/Dockerfile.ubi8 .
 
 centos7:
 	$(DOCKER) build --pull \
@@ -66,4 +60,4 @@ init:
 
 gen_bin: init
 	go get github.com/mitchellh/gox
-	CGO_ENABLED=0 gox -osarch=${REL_OSARCH} -ldflags ${LD_FLAGS} -output ${BIN_DIR}/${REL_OSARCH}/k8s-device-plugin ./
+	CGO_ENABLED=1 gox -osarch=${REL_OSARCH} -ldflags ${LD_FLAGS} -output ${BIN_DIR}/${REL_OSARCH}/k8s-device-plugin ./

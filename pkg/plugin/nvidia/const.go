@@ -32,5 +32,5 @@ const (
 	// Allocated gpu memory
 	AllocatedGPUResource = "VOLCANO_GPU_ALLOCATED"
 	// Total gpu mem
-	TotalGPUResource = "TOTAL_GPU"
+	TotalGPUResource = "VOLCANO_GPU_TOTAL"
 )
