@@ -1,4 +1,8 @@
-# NVIDIA device plugin for Kubernetes
+# Volcano device plugin for Kubernetes
+
+**Note**:
+This is based on [Nvidia Device Plugin](https://github.com/NVIDIA/k8s-device-plugin) to support soft isolation of GPU card.
+And collaborate with volcano, it is possible to enable GPU sharing.
 
 ## Table of Contents
 
@@ -7,24 +11,23 @@
 - [Quick Start](#quick-start)
   - [Preparing your GPU Nodes](#preparing-your-gpu-nodes)
   - [Enabling GPU Support in Kubernetes](#enabling-gpu-support-in-kubernetes)
-  - [Running GPU Jobs](#running-gpu-jobs)
+  - [Running GPU Sharing Jobs](#running-gpu-jobs)
 - [Docs](#docs)
-- [Changelog](#changelog)
 - [Issues and Contributing](#issues-and-contributing)
 
 
 ## About
 
-The NVIDIA device plugin for Kubernetes is a Daemonset that allows you to automatically:
-- Expose the number of GPUs on each nodes of your cluster
+The Volcano device plugin for Kubernetes is a Daemonset that allows you to automatically:
+- Expose the number of GPUs on each node of your cluster
 - Keep track of the health of your GPUs
 - Run GPU enabled containers in your Kubernetes cluster.
 
-This repository contains NVIDIA's official implementation of the [Kubernetes device plugin](https://github.com/kubernetes/community/blob/master/contributors/design-proposals/resource-management/device-plugin.md).
+This repository contains Volcano's official implementation of the [Kubernetes device plugin](https://github.com/kubernetes/community/blob/master/contributors/design-proposals/resource-management/device-plugin.md).
 
 ## Prerequisites
 
-The list of prerequisites for running the NVIDIA device plugin is described below:
+The list of prerequisites for running the Volcano device plugin is described below:
 * NVIDIA drivers ~= 384.81
 * nvidia-docker version > 2.0 (see how to [install](https://github.com/NVIDIA/nvidia-docker) and it's [prerequisites](https://github.com/nvidia/nvidia-docker/wiki/Installation-\(version-2.0\)#prerequisites))
 * docker configured with nvidia as the [default runtime](https://github.com/NVIDIA/nvidia-docker/wiki/Advanced-topics#default-runtime).
@@ -70,29 +73,36 @@ Once you have enabled this option on *all* the GPU nodes you wish to use,
 you can then enable GPU support in your cluster by deploying the following Daemonset:
 
 ```shell
-$ kubectl create -f https://raw.githubusercontent.com/NVIDIA/k8s-device-plugin/1.0.0-beta6/nvidia-device-plugin.yml
+$ kubectl create -f volcano-device-plugin.yml
 ```
 
-### Running GPU Jobs
+### Running GPU Sharing Jobs
 
-NVIDIA GPUs can now be consumed via container level resource requirements using the resource name nvidia.com/gpu:
+NVIDIA GPUs can now be shared via container level resource requirements using the resource name volcano.sh/gpu-memory:
 ```yaml
 apiVersion: v1
 kind: Pod
 metadata:
-  name: gpu-pod
+  name: gpu-pod1
 spec:
   containers:
     - name: cuda-container
       image: nvidia/cuda:9.0-devel
       resources:
         limits:
-          nvidia.com/gpu: 2 # requesting 2 GPUs
-    - name: digits-container
-      image: nvidia/digits:6.0
+          volcano.sh/gpu-memory: 1024 # requesting 1024MB GPU memory
+---
+apiVersion: v1
+kind: Pod
+metadata:
+  name: gpu-pod2
+spec:
+  containers:
+    - name: cuda-container
+      image: nvidia/cuda:9.0-devel
       resources:
         limits:
-          nvidia.com/gpu: 2 # requesting 2 GPUs
+          volcano.sh/gpu-memory: 1024 # requesting 1024MB GPU memory
 ```
 
 > **WARNING:** *if you don't request GPUs when using the device plugin with NVIDIA images all
@@ -102,132 +112,48 @@ spec:
 
 Please note that:
 - the device plugin feature is beta as of Kubernetes v1.11.
-- the NVIDIA device plugin is still considered beta and is missing
+- the Volcano device plugin is alpha and is missing
     - More comprehensive GPU health checking features
     - GPU cleanup features
+    - GPU hard isolation
     - ...
-- support will only be provided for the official NVIDIA device plugin.
 
 The next sections are focused on building the device plugin and running it.
 
 ### With Docker
 
 #### Build
-Option 1, pull the prebuilt image from [Docker Hub](https://hub.docker.com/r/nvidia/k8s-device-plugin):
 ```shell
-$ docker pull nvidia/k8s-device-plugin:1.0.0-beta6
-```
-
-Option 2, build without cloning the repository:
-```shell
-$ docker build -t nvidia/k8s-device-plugin:1.0.0-beta6 https://github.com/NVIDIA/k8s-device-plugin.git#1.0.0-beta6
-```
-
-Option 3, if you want to modify the code:
-```shell
-$ git clone https://github.com/NVIDIA/k8s-device-plugin.git && cd k8s-device-plugin
-$ git checkout 1.0.0-beta6
-$ docker build -t nvidia/k8s-device-plugin:1.0.0-beta6 .
+$ make ubuntu16.04.
 ```
 
 #### Run locally
 ```shell
-$ docker run --security-opt=no-new-privileges --cap-drop=ALL --network=none -it -v /var/lib/kubelet/device-plugins:/var/lib/kubelet/device-plugins nvidia/k8s-device-plugin:1.0.0-beta6
+$ docker run --security-opt=no-new-privileges --cap-drop=ALL --network=none -it -v /var/lib/kubelet/device-plugins:/var/lib/kubelet/device-plugins nvidia/k8s-device-plugin:{version}
 ```
 
-#### Deploy as Daemon Set:
+#### Deploy as DaemonSet:
 ```shell
 $ kubectl create -f nvidia-device-plugin.yml
 ```
 
-### Without Docker
-
-#### Build
-```shell
-$ C_INCLUDE_PATH=/usr/local/cuda/include LIBRARY_PATH=/usr/local/cuda/lib64 go build
-```
-
-#### Run locally
-```shell
-$ ./k8s-device-plugin
-```
-
-## Changelog
-
-### Version 1.0.0-beta6
-
-- Update CI, build system, and vendoring mechanism
-
-### Version 1.0.0-beta5
-
-- Add a new plugin.yml variant that is compatible with the CPUManager
-- Change CMD in Dockerfile to ENTRYPOINT
-- Add flag to optionally return list of device nodes in Allocate() call
-- Refactor device plugin to eventually handle multiple resource types
-- Move plugin error retry to event loop so we can exit with a signal
-- Update all vendored dependencies to their latest versions
-- Fix bug that was inadvertently *always* disabling health checks
-- Update minimal driver version to 384.81
-
-### Version 1.0.0-beta4
-
-- Fixes a bug with a nil pointer dereference around `getDevices:CPUAffinity`
-
-### Version 1.0.0-beta3
-
-- Manifest is updated for Kubernetes 1.16+ (apps/v1)
-- Adds more logging information
-
-### Version 1.0.0-beta2
-
-- Adds the Topology field for Kubernetes 1.16+
-
-### Version 1.0.0-beta1
-
-- If gRPC throws an error, the device plugin no longer ends up in a non responsive state.
-
-### Version 1.0.0-beta
-
-- Reversioned to SEMVER as device plugins aren't tied to a specific version of kubernetes anymore.
-
-### Version 1.11
-
-- No change.
-
-### Version 1.10
-
-- The device Plugin API is now v1beta1
-
-### Version 1.9
-
-- The device Plugin API changed and is no longer compatible with 1.8
-- Error messages were added
-
 # Issues and Contributing
 [Checkout the Contributing document!](CONTRIBUTING.md)
 
-* You can report a bug by [filing a new issue](https://github.com/NVIDIA/k8s-device-plugin/issues/new)
+* You can report a bug by [filing a new issue](https://github.com/volcano-sh/k8s-device-plugin/issues/new)
 * You can contribute by opening a [pull request](https://help.github.com/articles/using-pull-requests/)
 
 ## Versioning
 
-Before 1.10 the versioning scheme of the device plugin had to match exactly the version of Kubernetes.
-After the promotion of device plugins to beta this condition was was no longer required.
-We quickly noticed that this versioning scheme was very confusing for users as they still expected to see
-a version of the device plugin for each version of Kubernetes.
-
-We recently decided to reversion to follow a SEMVER scheme. This means that we are currently a
-beta project (as we depend on the device plugin API which is beta).
-If you have a version of Kubernetes > 1.10 you can deploy this device plugin.
+The version exactly matches with [Volcano](https://github.com/volcano-sh/volcano).
 
 ## Upgrading Kubernetes with the device plugin
 
 Upgrading Kubernetes when you have a device plugin deployed doesn't require you to do any,
 particular changes to your workflow.
 The API is versioned and is pretty stable (though it is not guaranteed to be non breaking),
-you can therefore use the 1.0.0-beta3 version starting from kubernetes version 1.10, upgrading
-kubernetes won't require you to deploy a different version of the device plugin and you will
-see GPUs re-registering themselves after your node comes back online.
+upgrading kubernetes won't require you to deploy a different version of the device plugin and you will
+see GPUs re-registering themselves after you node comes back online.
 
 
 Upgrading the device plugin is a more complex task. It is recommended to drain GPU tasks as

@@ -23,7 +23,6 @@ import (
 	"os/signal"
 	"syscall"
 
-	"github.com/NVIDIA/gpu-monitoring-tools/bindings/go/nvml"
 	"github.com/fsnotify/fsnotify"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 
@@ -34,37 +33,21 @@ import (
 
 func getAllPlugins() []plugin.DevicePlugin {
 	return []plugin.DevicePlugin{
-		nvidia.NewNvidiaDevicePlugin(
-			nvidia.VolcanoGPUResource,
-			"NVIDIA_VISIBLE_DEVICES",
-			pluginapi.DevicePluginPath+"nvidia.sock"),
+		nvidia.NewNvidiaDevicePlugin(),
 	}
 }
 
 func main() {
 	flag.Parse()
 
-	// TODO: move this down into nvidia device plugin
-	log.Println("Loading NVML")
-	if err := nvml.Init(); err != nil {
-		log.Printf("Failed to initialize NVML: %s.", err)
-		log.Printf("If this is a GPU node, did you set the docker default runtime to `nvidia`?")
-		log.Printf("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
-		log.Printf("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
-
-		select {}
-	}
-	defer func() { log.Println("Shutdown of NVML returned:", nvml.Shutdown()) }()
-
-	log.Println("Starting FS watcher.")
-	watcher, err := filewatcher.NewFSWatcher(pluginapi.DevicePluginPath)
+	log.Println("Starting file watcher.")
+	watcher, err := filewatcher.NewFileWatcher(pluginapi.DevicePluginPath)
 	if err != nil {
-		log.Println("Failed to created FS watcher.")
+		log.Printf("Failed to created file watcher: %v", err)
 		os.Exit(1)
 	}
-	defer watcher.Close()
 
-	log.Println("Starting OS watcher.")
+	log.Println("Starting OS signal watcher.")
 	sigCh := make(chan os.Signal, 1)
 	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
 
@@ -75,7 +58,6 @@ restart:
 	// Loop through all plugins, idempotently stopping them, and then starting
 	// them if they have any devices to serve. If even one plugin fails to
 	// start properly, try starting them all again.
-	started := 0
 	for _, p := range plugins {
 		p.Stop()
 
@@ -86,17 +68,12 @@ restart:
 
 		// Start the gRPC server for plugin p and connect it with the kubelet.
 		if err := p.Start(); err != nil {
-			log.Println("Could not contact Kubelet, retrying. Did you enable the device plugin feature gate?")
-			log.Printf("You can check the prerequisites at: https://github.com/NVIDIA/k8s-device-plugin#prerequisites")
-			log.Printf("You can learn how to set the runtime at: https://github.com/NVIDIA/k8s-device-plugin#quick-start")
+			log.Printf("Plugin %s failed to start: %v", p.Name(), err)
+			log.Printf("You can check the prerequisites at: https://github.com/volcano-sh/k8s-device-plugin#prerequisites")
+			log.Printf("You can learn how to set the runtime at: https://github.com/volcano-sh/k8s-device-plugin#quick-start")
 			// If there was an error starting any plugins, restart them all.
 			goto restart
 		}
-		started++
-	}
-
-	if started == 0 {
-		log.Println("No devices found. Waiting indefinitely.")
 	}
 
 	// Start an infinite loop, waiting for several indicators to either log

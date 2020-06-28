@@ -17,6 +17,7 @@ limitations under the License.
 package nvidia
 
 import (
+	"context"
 	"fmt"
 	"log"
 	"net"
@@ -25,11 +26,10 @@ import (
 	"sort"
 	"time"
 
-	"github.com/golang/glog"
+	"github.com/NVIDIA/gpu-monitoring-tools/bindings/go/nvml"
 	v1 "k8s.io/api/core/v1"
 	"k8s.io/klog"
 
-	"golang.org/x/net/context"
 	"google.golang.org/grpc"
 	pluginapi "k8s.io/kubelet/pkg/apis/deviceplugin/v1beta1"
 )
@@ -37,9 +37,8 @@ import (
 // NvidiaDevicePlugin implements the Kubernetes device plugin API
 type NvidiaDevicePlugin struct {
 	ResourceManager
-	resourceName   string
-	allocateEnvvar string
-	socket         string
+	resourceName string
+	socket       string
 
 	server *grpc.Server
 	// Physical gpu card
@@ -55,7 +54,14 @@ type NvidiaDevicePlugin struct {
 }
 
 // NewNvidiaDevicePlugin returns an initialized NvidiaDevicePlugin
-func NewNvidiaDevicePlugin(resourceName string, allocateEnvvar string, socket string) *NvidiaDevicePlugin {
+func NewNvidiaDevicePlugin() *NvidiaDevicePlugin {
+	log.Println("Loading NVML")
+	if err := nvml.Init(); err != nil {
+		log.Printf("Failed to initialize NVML: %s.", err)
+		log.Printf("If this is a GPU node, did you set the docker default runtime to `nvidia`?")
+		log.Printf("You can check the prerequisites at: https://github.com/volcano-sh/k8s-device-plugin#prerequisites")
+		log.Fatalf("You can learn how to set the runtime at: https://github.com/volcano-sh/k8s-device-plugin#quick-start")
+	}
 
 	ki, err := NewKubeInteractor()
 	if err != nil {
@@ -64,9 +70,8 @@ func NewNvidiaDevicePlugin(resourceName string, allocateEnvvar string, socket st
 
 	return &NvidiaDevicePlugin{
 		ResourceManager: NewGpuDeviceManager(),
-		resourceName:    resourceName,
-		allocateEnvvar:  allocateEnvvar,
-		socket:          socket,
+		resourceName:    VolcanoGPUResource,
+		socket:          pluginapi.DevicePluginPath + "volcano.sock",
 		kubeInteractor:  ki,
 
 		// These will be reinitialized every
@@ -91,11 +96,11 @@ func (m *NvidiaDevicePlugin) initialize() {
 
 func (m *NvidiaDevicePlugin) cleanup() {
 	close(m.stop)
+	m.stop = nil
 	m.physicalDevices = nil
 	m.server = nil
 	m.health = nil
-	m.stop = nil
-
+	m.virtualDevices = nil
 	m.devicesByIndex = nil
 }
 
@@ -105,6 +110,11 @@ func (m *NvidiaDevicePlugin) GetDeviceNameByIndex(index uint) (name string, foun
 		return name, ok
 	}
 	return "", false
+}
+
+// Name returns the name of the plugin
+func (m *NvidiaDevicePlugin) Name() string {
+	return "Volcano-GPU-Sharing"
 }
 
 // Start starts the gRPC server, registers the device plugin with the Kubelet,
@@ -215,13 +225,13 @@ func (m *NvidiaDevicePlugin) Register() error {
 	defer conn.Close()
 
 	client := pluginapi.NewRegistrationClient(conn)
-	reqt := &pluginapi.RegisterRequest{
+	req := &pluginapi.RegisterRequest{
 		Version:      pluginapi.Version,
 		Endpoint:     path.Base(m.socket),
 		ResourceName: m.resourceName,
 	}
 
-	_, err = client.Register(context.Background(), reqt)
+	_, err = client.Register(context.Background(), req)
 	if err != nil {
 		return err
 	}
@@ -287,7 +297,7 @@ func (m *NvidiaDevicePlugin) Allocate(ctx context.Context, reqs *pluginapi.Alloc
 			}
 
 			if GetGPUResourceOfContainer(&pod.Spec.Containers[i]) == firstContainerReqDeviceCount {
-				glog.Infof("Got candidate Pod %s(%s), the device count is: %d", pod.UID, c.Name, firstContainerReqDeviceCount)
+				klog.Infof("Got candidate Pod %s(%s), the device count is: %d", pod.UID, c.Name, firstContainerReqDeviceCount)
 				candidatePod = pod
 				goto Allocate
 			}
@@ -314,9 +324,8 @@ Allocate:
 	for _, req := range reqs.ContainerRequests {
 		reqGPU := len(req.DevicesIDs)
 		response := pluginapi.ContainerAllocateResponse{
-			//TODO: (tizhou86) Add envs into response
 			Envs: map[string]string{
-				m.allocateEnvvar:     fmt.Sprintf("%d", id),
+				VisibleDevice:        fmt.Sprintf("%d", id),
 				AllocatedGPUResource: fmt.Sprintf("%d", reqGPU),
 				TotalGPUResource:     fmt.Sprintf("%d", gpuMemory),
 			},
@@ -339,9 +348,10 @@ func (m *NvidiaDevicePlugin) PreStartContainer(context.Context, *pluginapi.PreSt
 
 // dial establishes the gRPC communication with the registered device plugin.
 func (m *NvidiaDevicePlugin) dial(unixSocketPath string, timeout time.Duration) (*grpc.ClientConn, error) {
-	c, err := grpc.Dial(unixSocketPath, grpc.WithInsecure(), grpc.WithBlock(),
-		grpc.WithTimeout(timeout),
-		grpc.WithDialer(func(addr string, timeout time.Duration) (net.Conn, error) {
+	ctx, cancel := context.WithTimeout(context.Background(), timeout)
+	defer cancel()
+	c, err := grpc.DialContext(ctx, unixSocketPath, grpc.WithInsecure(), grpc.WithBlock(),
+		grpc.WithContextDialer(func(ctx context.Context, addr string) (net.Conn, error) {
 			return net.DialTimeout("unix", addr, timeout)
 		}),
 	)
@@ -351,58 +361,4 @@ func (m *NvidiaDevicePlugin) dial(unixSocketPath string, timeout time.Duration) 
 	}
 
 	return c, nil
-}
-
-func (m *NvidiaDevicePlugin) deviceExists(id string) bool {
-	for _, d := range m.physicalDevices {
-		if d.ID == id {
-			return true
-		}
-	}
-	return false
-}
-
-func (m *NvidiaDevicePlugin) apiDevices() []*pluginapi.Device {
-	var pdevs []*pluginapi.Device
-	for _, d := range m.physicalDevices {
-		pdevs = append(pdevs, &d.Device)
-	}
-	return pdevs
-}
-
-func (m *NvidiaDevicePlugin) apiDeviceSpecs(filter []string) []*pluginapi.DeviceSpec {
-	var specs []*pluginapi.DeviceSpec
-
-	paths := []string{
-		"/dev/nvidiactl",
-		"/dev/nvidia-uvm",
-		"/dev/nvidia-uvm-tools",
-		"/dev/nvidia-modeset",
-	}
-
-	for _, p := range paths {
-		if _, err := os.Stat(p); err == nil {
-			spec := &pluginapi.DeviceSpec{
-				ContainerPath: p,
-				HostPath:      p,
-				Permissions:   "rw",
-			}
-			specs = append(specs, spec)
-		}
-	}
-
-	for _, d := range m.physicalDevices {
-		for _, id := range filter {
-			if d.ID == id {
-				spec := &pluginapi.DeviceSpec{
-					ContainerPath: d.Path,
-					HostPath:      d.Path,
-					Permissions:   "rw",
-				}
-				specs = append(specs, spec)
-			}
-		}
-	}
-
-	return specs
 }
