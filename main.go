@@ -47,12 +47,23 @@ func main() {
 		os.Exit(1)
 	}
 
-	log.Println("Starting OS signal watcher.")
-	sigCh := make(chan os.Signal, 1)
-	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM, syscall.SIGQUIT)
-
 	log.Println("Retrieving plugins.")
 	plugins := getAllPlugins()
+
+	log.Println("Starting OS signal watcher.")
+	sigCh := make(chan os.Signal, 1)
+	signal.Notify(sigCh, syscall.SIGHUP, syscall.SIGINT, syscall.SIGTERM)
+
+	go func() {
+		select {
+		case s := <-sigCh:
+			log.Printf("Received signal \"%v\", shutting down.", s)
+			for _, p := range plugins {
+				p.Stop()
+			}
+		}
+		os.Exit(-1)
+	}()
 
 restart:
 	// Loop through all plugins, idempotently stopping them, and then starting
@@ -92,22 +103,6 @@ restart:
 		// Watch for any other fs errors and log them.
 		case err := <-watcher.Errors:
 			log.Printf("inotify: %s", err)
-
-		// Watch for any signals from the OS. On SIGHUP, restart this loop,
-		// restarting all of the plugins in the process. On all other
-		// signals, exit the loop and exit the program.
-		case s := <-sigCh:
-			switch s {
-			case syscall.SIGHUP:
-				log.Println("Received SIGHUP, restarting.")
-				goto restart
-			default:
-				log.Printf("Received signal \"%v\", shutting down.", s)
-				for _, p := range plugins {
-					p.Stop()
-				}
-				return
-			}
 		}
 	}
 }
